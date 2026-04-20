@@ -1,0 +1,13 @@
+openai
+fastapi
+uvicorn
+mysql-connector-python
+python-dotenv
+pydantic
+streamlit
+requests
+numpy
+pandas
+groq
+openpyxl
+python-multipart
