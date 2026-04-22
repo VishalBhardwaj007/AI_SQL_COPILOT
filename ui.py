@@ -1,9 +1,9 @@
-import pandas as pd
+﻿import pandas as pd
 import requests
 import streamlit as st
-from forecasting import forecast_sales   # ✅ NEW
+from forecast import forecast_sales   
 
-API_BASE_URL = "http://127.0.0.1:8000"   # ✅ FIX PORT
+API_BASE_URL = "http://127.0.0.1:8000"   
 
 st.title("AI SQL Copilot")
 
@@ -56,7 +56,7 @@ suggestions = [
     "Show all customers",
     "Show customers from Delhi",
     "Show all from uploaded_data",
-    "forecast sales",   # ✅ added
+    "forecast sales",   
 ]
 
 query = st.selectbox("Choose query:", suggestions)

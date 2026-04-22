@@ -1,17 +1,5 @@
 .venv/
 __pycache__/
-*.py[cod]
-
 .env
-.env.*
-!.env.example
-
 *.db
 mysql_data/
-
-.vscode/
-.idea/
-
-*.log
-.DS_Store
-Thumbs.db
