@@ -99,7 +99,7 @@ def generate_sql(user_query: str, schema: Dict[str, List[str]]) -> str:
         else:
             raise
 
-    # ✅ SAFE extraction
+    
     content = response.choices[0].message.content or ""
 
     if content == "":

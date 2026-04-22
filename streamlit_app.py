@@ -1,10 +1,12 @@
+from io import BytesIO, StringIO
+
 import requests
 import pandas as pd
 import streamlit as st
 from forecasting import forecast_values
 
 
-st.set_page_config(page_title="QueryLens AI", layout="wide")
+st.set_page_config(page_title="AI SQL Copilot", layout="wide")
 
 st.markdown(
     """
@@ -176,7 +178,7 @@ st.markdown(
     </style>
 
     <section class="hero">
-        <h1>QueryLens AI</h1>
+        <h1>AI SQL Copilot</h1>
         <p>Upload business data, ask plain-English questions, inspect generated SQL, and turn sales history into a quick forecast.</p>
     </section>
 
@@ -198,7 +200,88 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 api_url = st.text_input("FastAPI URL", value="http://127.0.0.1:8000")
+
+
+def get_auth_headers() -> dict[str, str]:
+    token = st.session_state.get("access_token")
+    if not token:
+        return {}
+
+    return {"Authorization": f"Bearer {token}"}
+
+
+def auth_request(base_url: str, endpoint: str, username: str, password: str) -> dict:
+    response = requests.post(
+        f"{base_url}{endpoint}",
+        json={"username": username, "password": password},
+        timeout=20,
+    )
+    data = response.json()
+    if not response.ok:
+        detail = data.get("detail", "Authentication failed")
+        raise RuntimeError(detail)
+
+    return data
+
+
+def logout(base_url: str) -> None:
+    try:
+        requests.post(f"{base_url}/auth/logout", headers=get_auth_headers(), timeout=10)
+    except Exception:
+        pass
+
+    st.session_state.pop("access_token", None)
+    st.session_state.pop("username", None)
+    st.rerun()
+
+
+def render_auth(base_url: str) -> None:
+    if st.session_state.get("access_token"):
+        with st.sidebar:
+            st.caption(f"Signed in as `{st.session_state.get('username', 'user')}`")
+            if st.button("Log out"):
+                logout(base_url)
+        return
+
+    st.subheader("Account")
+    login_tab, signup_tab = st.tabs(["Login", "Sign up"])
+
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Login")
+
+        if submitted:
+            try:
+                data = auth_request(base_url, "/auth/login", username, password)
+                st.session_state["access_token"] = data["access_token"]
+                st.session_state["username"] = data["username"]
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+    with signup_tab:
+        with st.form("signup_form"):
+            username = st.text_input("Username", key="signup_username")
+            password = st.text_input("Password", type="password", key="signup_password")
+            submitted = st.form_submit_button("Create account")
+
+        if submitted:
+            try:
+                data = auth_request(base_url, "/auth/signup", username, password)
+                st.session_state["access_token"] = data["access_token"]
+                st.session_state["username"] = data["username"]
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+    st.stop()
+
+
+render_auth(api_url)
 
 
 def api_is_online(base_url: str) -> bool:
@@ -207,6 +290,56 @@ def api_is_online(base_url: str) -> bool:
         return r.ok
     except Exception:
         return False
+
+
+def read_uploaded_dataframe(uploaded_file) -> pd.DataFrame:
+    file_bytes = uploaded_file.getvalue()
+    file_name = uploaded_file.name.lower()
+
+    if file_name.endswith(".csv"):
+        try:
+            return pd.read_csv(StringIO(file_bytes.decode("utf-8")))
+        except UnicodeDecodeError:
+            return pd.read_csv(StringIO(file_bytes.decode("latin-1")))
+
+    return pd.read_excel(BytesIO(file_bytes))
+
+
+def fetch_tables(base_url: str) -> list[dict]:
+    response = requests.get(f"{base_url}/tables", headers=get_auth_headers(), timeout=20)
+    data = response.json()
+    if not response.ok or "error" in data:
+        raise RuntimeError(data.get("error", "Could not load tables"))
+
+    tables = data.get("tables", [])
+    return tables if isinstance(tables, list) else []
+
+
+def fetch_table_preview(base_url: str, table_name: str, limit: int = 100) -> dict:
+    response = requests.get(
+        f"{base_url}/tables/{table_name}/preview",
+        headers=get_auth_headers(),
+        params={"limit": limit},
+        timeout=20,
+    )
+    data = response.json()
+    if not response.ok or "error" in data:
+        raise RuntimeError(data.get("error", "Could not load table preview"))
+
+    return data
+
+
+def delete_table(base_url: str, table_name: str) -> dict:
+    response = requests.delete(
+        f"{base_url}/tables/{table_name}",
+        headers=get_auth_headers(),
+        timeout=20,
+    )
+    data = response.json()
+    if not response.ok or "error" in data:
+        raise RuntimeError(data.get("error", "Could not remove table"))
+
+    return data
 
 
 online = api_is_online(api_url)
@@ -262,7 +395,7 @@ def render_sales_forecast(rows: list[dict], prompt: str, periods: int = 5) -> No
         if history["date"].notna().sum() == 0:
             history["date"] = pd.to_datetime(df[date_col], errors="coerce")
         history = history.dropna(subset=["date", "value"])
-        history = history.groupby("date", as_index=False)["value"].sum().sort_values("date")
+        history = history.groupby("date", as_index=False).agg({"value": "sum"}).sort_values(by="date")
         labels = [date.strftime("%Y-%m-%d") for date in history["date"]]
     else:
         history = history.dropna(subset=["value"]).reset_index(drop=True)
@@ -305,25 +438,112 @@ def render_sales_forecast(rows: list[dict], prompt: str, periods: int = 5) -> No
         )
 
 st.subheader("1) Upload CSV/Excel")
-uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx", "xls"])
+uploaded_files = st.file_uploader(
+    "Choose one or more files",
+    type=["csv", "xlsx", "xls"],
+    accept_multiple_files=True,
+)
 
-if uploaded_file and st.button("Upload"):
+if uploaded_files:
+    st.caption(f"{len(uploaded_files)} file(s) selected")
+    preview_tabs = st.tabs([uploaded_file.name for uploaded_file in uploaded_files])
+
+    for preview_tab, uploaded_file in zip(preview_tabs, uploaded_files):
+        with preview_tab:
+            try:
+                uploaded_df = read_uploaded_dataframe(uploaded_file)
+                st.caption(
+                    f"Previewing `{uploaded_file.name}`: "
+                    f"{len(uploaded_df):,} rows x {len(uploaded_df.columns):,} columns"
+                )
+                st.dataframe(uploaded_df, use_container_width=True, height=320)
+            except Exception as exc:
+                st.warning(f"Could not preview uploaded file: {exc}")
+
+if uploaded_files and st.button("Upload"):
     if not online:
         st.warning("Backend is offline. Start FastAPI and try again.")
         st.stop()
     try:
-        files = {
-            "file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)
-        }
-        response = requests.post(f"{api_url}/upload", files=files, timeout=60)
+        files = [
+            ("files", (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type))
+            for uploaded_file in uploaded_files
+        ]
+        response = requests.post(
+            f"{api_url}/upload",
+            files=files,
+            headers=get_auth_headers(),
+            timeout=60,
+        )
         data = response.json()
         if response.ok:
             st.success(data.get("message", "Uploaded"))
-            st.write(data)
+            tables = data.get("tables", [])
+            if tables:
+                st.dataframe(pd.DataFrame(tables), use_container_width=True)
+            else:
+                st.write(data)
         else:
             st.error(data)
     except Exception as exc:
         st.error(f"Upload failed: {exc}")
+
+if online:
+    st.subheader("Current Tables")
+    try:
+        tables = fetch_tables(api_url)
+        if tables:
+            table_df = pd.DataFrame(
+                [
+                    {
+                        "table": table["table"],
+                        "rows": table["rows"],
+                        "columns": table["column_count"],
+                    }
+                    for table in tables
+                ]
+            )
+            st.dataframe(table_df, use_container_width=True, hide_index=True)
+
+            table_names = [str(table["table"]) for table in tables]
+            selected_table = st.selectbox(
+                "Switch table",
+                table_names,
+            )
+            if selected_table is None:
+                st.stop()
+
+            selected_table_name = str(selected_table)
+            selected_info = next(
+                table for table in tables if table["table"] == selected_table_name
+            )
+            if st.button("Remove selected table", type="secondary"):
+                result = delete_table(api_url, selected_table_name)
+                st.success(result.get("message", "Table removed"))
+                st.rerun()
+
+            st.caption(
+                f"`{selected_table_name}` columns: "
+                + ", ".join(f"`{column}`" for column in selected_info["columns"])
+            )
+
+            preview_limit = st.slider(
+                "Preview rows",
+                min_value=10,
+                max_value=500,
+                value=100,
+                step=10,
+            )
+            preview = fetch_table_preview(api_url, selected_table_name, preview_limit)
+            st.dataframe(
+                pd.DataFrame(preview.get("rows", [])),
+                use_container_width=True,
+                height=320,
+            )
+        else:
+            st.info("No uploaded tables yet.")
+    except Exception as exc:
+        st.warning(f"Could not load uploaded tables: {exc}")
 
 st.subheader("2) Ask in plain English")
 prompt = st.text_area("Your question", placeholder="e.g. show top 5 cities by customer count")
@@ -338,6 +558,7 @@ if st.button("Run Query"):
             response = requests.post(
                 f"{api_url}/query",
                 json={"user_query": prompt},
+                headers=get_auth_headers(),
                 timeout=90,
             )
             data = response.json()
@@ -373,6 +594,7 @@ if st.button("Generate Sales Forecast"):
             response = requests.get(
                 f"{api_url}/forecast/sales",
                 params={"periods": int(forecast_periods)},
+                headers=get_auth_headers(),
                 timeout=60,
             )
             data = response.json()
